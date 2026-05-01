@@ -1,0 +1,63 @@
+############################################################
+# MODEL
+############################################################
+
+
+struct ResBlock
+    conv1
+    bn1
+    conv2
+    bn2
+    skip
+end
+
+Flux.@layer ResBlock
+
+function ResBlock(ch_in::Int, ch_out::Int; stride::Int=1)
+    conv1 = Conv((7,), ch_in  => ch_out; stride=stride, pad=3)
+    bn1   = BatchNorm(ch_out)
+    conv2 = Conv((7,), ch_out => ch_out; pad=3)
+    bn2   = BatchNorm(ch_out)
+
+    if stride == 1 && ch_in == ch_out
+        skip = identity
+    else
+        skip = Chain(
+            Conv((1,), ch_in => ch_out; stride=stride),
+            BatchNorm(ch_out),
+        )
+    end
+
+    return ResBlock(conv1, bn1, conv2, bn2, skip)
+end
+
+function (b::ResBlock)(x)
+    h = relu.(b.bn1(b.conv1(x)))
+    h = b.bn2(b.conv2(h))
+    return relu.(h .+ b.skip(x))
+end
+
+function build_model(spec_len::Int, n_fg::Int)
+    m = Chain(
+        x -> reshape(x, spec_len, 1, :),
+
+        Conv((15,), 1 => 32; stride=2, pad=7),
+        BatchNorm(32),
+        x -> relu.(x),
+
+        ResBlock(32,  32;  stride=2),
+        ResBlock(32,  64;  stride=2),
+        ResBlock(64,  64;  stride=2),
+        ResBlock(64,  128; stride=2),
+        ResBlock(128, 128; stride=2),
+
+        x -> dropdims(mean(x; dims=1); dims=1),
+
+        Dense(128, 64, relu),
+        Dropout(0.3),
+        Dense(64, n_fg),
+    )
+
+    return CUDA.functional() ? gpu(m) : m
+end
+
