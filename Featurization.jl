@@ -10,13 +10,40 @@ const Chem = pyimport("rdkit.Chem")
 ############################################################
 
 const FG_SMARTS = Dict(
-    "ester"    => "[CX3](=O)[OX2H0][#6]",
-    "aromatic" => "c1ccccc1",
-    "alkane"   => "[CX4]",
-    "alkene"   => "C=C",
-    "halogen"  => "[F,Cl,Br,I]",
-    "alcohol"  => "[OX2H]",
-    "ether"    => "[OD2]([#6])[#6]",
+    # Hydrocarbons
+    "Alkane" => "[CX4]",  # sp3 carbon with 4 bonds
+    "Alkene" => "[CX3]=[CX3]",  # C=C double bond
+    "Alkyne" => "[CX2]#[CX2]",  # C≡C triple bond
+    "Arene" => "c",  # Aromatic carbon
+    
+    # Halides
+    "Chloroalkane" => "[CX4][Cl]",  # C-Cl (aliphatic)
+    "Fluoroalkane" => "[CX4][F]",  # C-F (aliphatic)
+    "Bromoalkane" => "[CX4][Br]",  # C-Br (aliphatic)
+    "Iodoalkane" => "[CX4][I]",  # C-I (aliphatic)
+    
+    # Oxygen-containing groups
+    "Acyl chloride" => "[CX3](=[OX1])[Cl]",  # R-C(=O)-Cl
+    "Alcohol" => "[CX4][OX2H]",  # R-OH (aliphatic)
+    "Aldehyde" => "[CX3H1](=O)[#6]",  # R-CHO
+    "Ketone" => "[#6][CX3](=O)[#6]",  # R-C(=O)-R"
+    "Carboxylic acid" => "[CX3](=O)[OX2H1]",  # R-COOH
+    "Acid anhydride" => "[CX3](=[OX1])[OX2][CX3](=[OX1])",  # R-C(=O)-O-C(=O)-R"
+    "Ester" => "[#6][CX3](=O)[OX2][#6]",  # R-C(=O)-O-R"
+    "Ether" => "[OD2]([#6])[#6]",  # R-O-R" (not in C=O)
+    "Phenol" => "[OX2H][c]",  # Ar-OH (aromatic)
+    "Enol" => "[OX2H][CX3]=[CX3]",  # C=C-OH
+    
+    # Nitrogen-containing groups
+    "Amine" => "[NX3;H2,H1;!$(NC=O)]",  # R-NH2 or R2-NH (not amide)
+    "Amide" => "[NX3][CX3](=[OX1])",  # R-C(=O)-N
+    "Nitrile" => "[NX1]#[CX2]",  # R-C≡N
+    "Imide" => "[CX3](=[OX1])[NX3][CX3](=[OX1])",  # O=C-NH-C=O
+    "Imine" => "[CX3]=[NX2;!$(N=O)]",  # R-C=N-R" (not nitro)
+    
+    # Sulfur-containing groups
+    "Thiol" => "[#16X2H]",  # R-SH
+    "Sulfide" => "[#16X2]([#6])[#6]",  # R-S-R"
 )
 
 const FG_NAMES = sort(collect(keys(FG_SMARTS)))
