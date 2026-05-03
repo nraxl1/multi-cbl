@@ -1,0 +1,4 @@
+parquet-files/data/*.parquet
+chunk_cache/*
+model.jld2*
+Manifest.toml
