@@ -30,3 +30,7 @@ JuliaLocalPreferences.toml
 .ipynb*
 chunk_cache
 Project.toml
+Manifest.toml
+CondaPkg.toml
+.CondaPkg
+model*.jld2*

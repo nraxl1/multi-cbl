@@ -2,6 +2,36 @@
 # MODEL
 ############################################################
 
+# --- Type-stable custom layers (no anonymous functions) ---
+
+"""
+    ReshapeLayer(spec_len)
+
+Replaces `x -> reshape(x, spec_len, 1, :)`. A named struct avoids
+the boxing that happens when a closure captures `spec_len` from an
+enclosing function, which is critical for Zygote gradient specialization.
+"""
+struct ReshapeLayer
+    spec_len::Int
+end
+
+(m::ReshapeLayer)(x) = reshape(x, m.spec_len, 1, :)
+
+"""
+    GlobalMeanPool
+
+Replaces `x -> dropdims(mean(x; dims=1); dims=1)`. A named singleton
+type lets Zygote fully specialize the gradient, avoiding the generic
+(alloc-heavy) AD path that anonymous functions can trigger.
+"""
+struct GlobalMeanPool end
+
+(m::GlobalMeanPool)(x) = dropdims(mean(x; dims=1); dims=1)
+
+# No @layer needed — these types have no trainable parameters or
+# sub-layers. Flux's generic fallback handles them correctly.
+
+# --- ResBlock ---
 
 struct ResBlock
     conv1
@@ -39,13 +69,19 @@ end
 
 function build_model(spec_len::Int, n_fg::Int)
     m = Chain(
-        x -> reshape(x, spec_len, 1, :), Conv((15,), 1 => 32; stride=2, pad=7),
+        ReshapeLayer(spec_len),
+        # Stride 4 instead of 2 halves the first intermediate (98→49 MB at batch 128)
+        # Kernel 31 maintains enough receptive field for IR band detection
+        Conv((31,), 1 => 32; stride=4, pad=15),
         BatchNorm(32),
-        x -> relu.(x), ResBlock(32, 32; stride=2),
+        relu,
+        ResBlock(32, 32; stride=2),
         ResBlock(32, 64; stride=2),
         ResBlock(64, 64; stride=2),
         ResBlock(64, 128; stride=2),
-        ResBlock(128, 128; stride=2), x -> dropdims(mean(x; dims=1); dims=1), Dense(128, 64, relu),
+        ResBlock(128, 128; stride=2),
+        GlobalMeanPool(),
+        Dense(128, 64, relu),
         Dropout(0.3),
         Dense(64, n_fg),
     )

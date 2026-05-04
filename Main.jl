@@ -4,7 +4,7 @@ Pkg.activate(".")
 
 using DuckDB, DBInterface, DataFrames
 using Flux, Statistics, Random, Printf
-using MLDataDevices, PythonCall, JLD2, CUDA, cuDNN
+using MLDataDevices, PythonCall, JLD2, CUDA, cuDNN, GPUArrays, Revise, ProgressMeter
 using MLUtils: DataLoader
 import .GC
 
@@ -14,12 +14,14 @@ include("src/LoadData.jl")
 include("src/Training.jl")
 
 const CHUNKS = [
-    "src/parquet-files/IR_data_chunk00$(i)_of_009.parquet" for i in 7:7
+    "../../courses/multi-cbl/multi-cbl/parquet-files/data/IR_data_chunk00$(i)_of_009.parquet" for i in 8:8
 ]
 
-const CACHE_DIR = "chunk_cache"
+const CACHE_DIR = "../../courses/multi-cbl/multi-cbl/chunk_cache"
 const MODEL_PATH = "model.jld2"
 const ARCH_VERSION = "rescnn-v1"
+
+CUDA.functional() && CUDA.allowscalar(false)
 
 function main()
     Random.seed!(42)
@@ -71,7 +73,7 @@ function main()
         println("\nModel parameters: $n_params")
         typeof(Xv)
         typeof(Yv)
-        train_model!(model, CHUNKS, norm, Xv, Yv; epochs=10)
+        train_model!(model, CHUNKS, norm, Xv, Yv; epochs=30)
 
         println("\nSaving model → $MODEL_PATH")
         JLD2.save(MODEL_PATH,
@@ -87,7 +89,7 @@ function main()
 
     # ---- test evaluation (batched to avoid VRAM OOM) ----
     Flux.testmode!(model)
-    test_loader = DataLoader((Xt, Yt), batchsize=128)
+    test_loader = DataLoader((Xt, Yt), batchsize=64)
 
     all_pred = Vector{Matrix{Float32}}()
     all_true = Vector{Matrix{Float32}}()
@@ -102,13 +104,26 @@ function main()
     pred_cpu = hcat(all_pred...)
     Yt_cpu = hcat(all_true...)
 
-    overall_acc = mean((pred_cpu .> 0.5f0) .== Yt_cpu)
+    pred_bin = pred_cpu .> 0.5f0
+    overall_acc = mean(pred_bin .== Yt_cpu)
+
+    # per-label F1
+    tp = vec(sum(pred_bin .& (Yt_cpu .== 1f0), dims=2))
+    fp = vec(sum(pred_bin .& (Yt_cpu .== 0f0), dims=2))
+    fn = vec(sum((pred_bin .== 0f0) .& (Yt_cpu .== 1f0), dims=2))
+
+    precision = tp ./ (tp .+ fp .+ eps(Float32))
+    recall    = tp ./ (tp .+ fn .+ eps(Float32))
+    f1        = 2f0 .* precision .* recall ./ (precision .+ recall .+ eps(Float32))
+    macro_f1  = mean(f1)
+
     println("\n=== TEST RESULTS ===")
     println("Overall accuracy: $(round(100*overall_acc, digits=2))%")
+    println("Macro F1:         $(round(100*macro_f1, digits=2))%")
 
     for (i, name) in enumerate(FG_NAMES)
-        acc_i = mean((pred_cpu[i, :] .> 0.5f0) .== Yt_cpu[i, :])
-        @printf("  %-12s accuracy: %.1f%%\n", name, 100 * acc_i)
+        acc_i = mean(pred_bin[i, :] .== Yt_cpu[i, :])
+        @printf("  %-20s accuracy: %6.2f%%   F1: %6.2f%%\n", name, 100 * acc_i, 100 * f1[i])
     end
 end
 

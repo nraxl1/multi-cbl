@@ -1,4 +1,4 @@
-parquet-files/data/*.parquet
+parquet-files/*.parquet
 chunk_cache/*
 model.jld2*
 Manifest.toml
