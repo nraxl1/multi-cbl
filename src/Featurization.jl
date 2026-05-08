@@ -9,6 +9,7 @@ const Chem = pyimport("rdkit.Chem")
 # FUNCTIONAL GROUPS
 ############################################################
 
+#=
 const FG_SMARTS = Dict(
     # Hydrocarbons
     "Alkane" => "[CX4]",  # sp3 carbon with 4 bonds
@@ -44,8 +45,23 @@ const FG_SMARTS = Dict(
     # Sulfur-containing groups
     "Thiol" => "[#16X2H]",  # R-SH
     "Sulfide" => "[#16X2]([#6])[#6]",  # R-S-R"
-)
+# )
 
+const FG_NAMES = sort(collect(keys(FG_SMARTS)))
+const N_FG     = length(FG_NAMES)
+
+const FG_PATTERNS = Dict(
+    k => Chem.MolFromSmarts(v) for (k, v) in FG_SMARTS
+)
+=#
+
+const FG_SMARTS = Dict(
+  "Chlorine" => "[Cl]",
+  "Ester Linkage" => "[CX3](=O)[OX2]",
+  "Aromatic Ring" => "c1ccccc1",
+  "Methyl Branch" => "[CH3]",
+  "Ethylene Backbone" => "[CH2]"
+)
 const FG_NAMES = sort(collect(keys(FG_SMARTS)))
 const N_FG     = length(FG_NAMES)
 

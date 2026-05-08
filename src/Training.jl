@@ -8,10 +8,11 @@ function train_model!(model, chunk_paths::Vector{String},
     epochs=10)
     dev = MLDataDevices.gpu_device()
     opt_state = Flux.setup(Adam(1e-3), model)
-    val_loader = DataLoader((Xv, Yv), batchsize=64,
+    val_loader = DataLoader((Xv, Yv), batchsize=256,
      partial=false, parallel=true) |> dev
     # dev = MLDataDevices.gpu_device() idk why i had 2 of these
-    loss_fn(m, x, y) = Flux.binary_focal_loss(softmax(m(x)), y, gamma=2)
+    loss_fn(m, x, y) = Flux.binary_focal_loss(clamp.(sigmoid(m(x)), 1f-6, 1f0 - 1f-6), y, gamma=2)
+    # loss_fn(m, x, y) = Flux.logitbinarycrossentropy(m(x), y)
     @showprogress desc="Epochs" for e in 1:epochs
         Flux.trainmode!(model)
         @showprogress desc="Chunks" offset=1 for path in shuffle(chunk_paths)
@@ -21,9 +22,9 @@ function train_model!(model, chunk_paths::Vector{String},
             Ytr = Y[:, tr_idx]
             perm = randperm(size(Xtr, 2))
             train_loader = DataLoader((Xtr[:, perm], Ytr[:, perm]),
-                                      batchsize=64, shuffle=false, 
+                                      batchsize=256, shuffle=false, 
                                       partial=false, parallel=true) |> dev
-            @showprogress desc="Batches" offset=2 for (x, y) in train_loader
+            for (x, y) in train_loader
                 loss, grads = Flux.withgradient(m -> loss_fn(m, x, y), model)
                 Flux.update!(opt_state, model, grads[1])
             end

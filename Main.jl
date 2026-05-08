@@ -9,12 +9,12 @@ using MLUtils: DataLoader
 import .GC
 
 include("src/Featurization.jl")
-include("src/Model.jl")
+include("src/ModelNext.jl")
 include("src/LoadData.jl")
-include("src/Training.jl")
+include("src/TrainingNext.jl")
 
 const CHUNKS = [
-    "../../courses/multi-cbl/multi-cbl/parquet-files/data/IR_data_chunk00$(i)_of_009.parquet" for i in 8:8
+    "../../courses/multi-cbl/multi-cbl/parquet-files/data/IR_data_chunk00$(i)_of_009.parquet" for i in 7:7
 ]
 
 const CACHE_DIR = "../../courses/multi-cbl/multi-cbl/chunk_cache"
@@ -73,7 +73,7 @@ function main()
         println("\nModel parameters: $n_params")
         typeof(Xv)
         typeof(Yv)
-        train_model!(model, CHUNKS, norm, Xv, Yv; epochs=30)
+        train_model!(model, CHUNKS, norm, Xv, Yv; epochs=50, lr_start=1.0f-3, lr_min=1.0f-6, patience=5)
 
         println("\nSaving model → $MODEL_PATH")
         JLD2.save(MODEL_PATH,
@@ -89,7 +89,7 @@ function main()
 
     # ---- test evaluation (batched to avoid VRAM OOM) ----
     Flux.testmode!(model)
-    test_loader = DataLoader((Xt, Yt), batchsize=64)
+    test_loader = DataLoader((Xt, Yt), batchsize=256)
 
     all_pred = Vector{Matrix{Float32}}()
     all_true = Vector{Matrix{Float32}}()

@@ -1,22 +1,52 @@
 const CACHE_DIR  = "chunk_cache"
 
-
+using DuckDB, DBInterface
 
 ############################################################
 # LOAD ONE CHUNK
 ############################################################
 
+
+"""
+Open parquet file at ```path``` and return the provided columns as a Julia ```DataFrame```.
+Returns all columns if ```columns``` is not provided. Uses a provided DuckDB connection if available. 
+
+
+WARNING: ```columns``` is passed directly into an SQL query with **NO SANITIZATION**
+"""
+function ParquetDataFrame(path::String, columns::String, conn::DBInterface.Connection)
+    parquet_df = DBInterface.execute(conn, """
+        SELECT $columns
+        FROM read_parquet('$path')
+    """) |> DataFrame
+    return parquet_df
+end
+
+function ParquetDataFrame(path::String, columns::String)
+    conn = DBInterface.connect(DuckDB.DB, ":memory:")
+    parquet_df = ParquetDataFrame(path::String, columns)
+    DBInterface.close!(conn)
+    return parquet_df
+end
+
+# find out how to make kwags work here and it will be so clean 
+function ParquetDataFrame(path::String, columns::Vector{String})
+    return ParquetDataFrame(path, join(columns, ", "))
+end
+
+function ParquetDataFrame(path::String)
+    return ParquetDataFrame(path)
+end
+
+
 function load_chunk(path::String)
     println("  Loading $path ...")
-    con = DBInterface.connect(DuckDB.DB)
+    con = DBInterface.connect(DuckDB.DB, ":memory:")
 
-    df = DBInterface.execute(con, """
+    df = DuckDB.execute(con, """
         SELECT smiles, ir_spectra
         FROM read_parquet('$path')
-        WHERE smiles IS NOT NULL
-          AND ir_spectra IS NOT NULL
     """) |> DataFrame
-
     DBInterface.close!(con)
     println("  Rows after SQL filter: $(nrow(df))")
 
