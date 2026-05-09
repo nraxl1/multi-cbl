@@ -15,10 +15,11 @@ using CondaPkg, PythonCall
 const Chem = pyimport("rdkit.Chem")
 
 ## Helper values
-const PARQUET_PATHS = ["../../courses/multi-cbl/multi-cbl/parquet-files/data/IR_data_chunk00$(i)_of_009.parquet" for i in 1:9]
+const PARQUET_PATHS = ["src/parquet-files/data/IR_data_chunk00$(i)_of_009.parquet" for i in 1:9]
 const DB_PATH = "cache.duckdb" # Can use ":memory:" to use in-memory caching
 
-# Need to validate that this is what we really need -efe
+# Need to validate that this is what we really need -efe 
+# outdated
 const FG_SMARTS = Dict(
   "Chlorine" => "[Cl]",
   "Ester Linkage" => "[CX3](=O)[OX2][CX4]",
