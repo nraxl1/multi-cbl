@@ -14,12 +14,12 @@ include("src/LoadData.jl")
 include("src/TrainingNext.jl")
 
 const CHUNKS = [
-    "../../courses/multi-cbl/multi-cbl/parquet-files/data/IR_data_chunk00$(i)_of_009.parquet" for i in 7:7
+    "src/parquet-files/data/IR_data_chunk00$(i)_of_009.parquet" for i in 1:9
 ]
 
-const CACHE_DIR = "../../courses/multi-cbl/multi-cbl/chunk_cache"
+const CACHE_DIR = "chunk_cache"
 const MODEL_PATH = "model.jld2"
-const ARCH_VERSION = "rescnn-v1"
+const ARCH_VERSION = "rescnn-v2"
 
 CUDA.functional() && CUDA.allowscalar(false)
 
