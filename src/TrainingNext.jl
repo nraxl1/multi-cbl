@@ -65,7 +65,7 @@ function train_model!(model, chunk_paths::Vector{String},
                             partial=false, parallel=true) |> dev
 
     loss_fn(m, x, y) = Flux.binary_focal_loss(
-        clamp.(sigmoid(m(x)), 1f-6, 1f0 - 1f-6), y, gamma=2)
+        clamp.(sigmoid(m(x)), 1f-6, 1f0 - 1f-6), y, gamma=0.6)
 
     @showprogress desc="Epochs" for e in (start_epoch+1):epochs
 
