@@ -3,8 +3,11 @@ using Pkg
 Pkg.activate(".")
 
 using DuckDB, DBInterface, DataFrames
-using Flux, Statistics, Random, Printf
-using MLDataDevices, PythonCall, JLD2, CUDA, cuDNN, GPUArrays, Revise, ProgressMeter
+using Lux, Enzyme, Optimisers, NNlib
+using Statistics, Random, Printf
+using MLDataDevices
+using Functors: fmap
+using PythonCall, JLD2, CUDA, GPUArrays, Revise, ProgressMeter
 using MLUtils: DataLoader
 import .GC
 
@@ -23,6 +26,22 @@ const ARCH_VERSION = "rescnn-v2"
 
 CUDA.functional() && CUDA.allowscalar(false)
 
+# --- helpers ---
+
+function count_params(x)
+    if x isa AbstractArray
+        return length(x)
+    elseif x isa NamedTuple
+        return sum(count_params, values(x))
+    elseif x isa Tuple
+        return sum(count_params, x)
+    else
+        return 0
+    end
+end
+
+# --- main ---
+
 function main()
     Random.seed!(42)
 
@@ -30,7 +49,7 @@ function main()
     @info "Using device: $dev"
 
     println("=== Bootstrapping from chunk 1 ===")
-    X1, Y1, s1 = cached_load_chunk(CHUNKS[1]) # cache-aware parquet chunk loader
+    X1, Y1, s1 = cached_load_chunk(CHUNKS[1])
 
     spec_len = size(X1, 1)
     println("\nSpectrum length: $spec_len  |  Labels: $N_FG")
@@ -40,9 +59,8 @@ function main()
     val1 = findall(s -> s == 8, s1)
     tst1 = findall(s -> s == 9, s1)
 
-    norm = fit_normalizer(X1[:, tr1]) # doesnt take long
+    norm = fit_normalizer(X1[:, tr1])
 
-    # these dont take long either
     Xv = apply_normalizer(norm, X1[:, val1])
     Yv = Y1[:, val1]
     Xt = apply_normalizer(norm, X1[:, tst1])
@@ -54,8 +72,14 @@ function main()
     X1 = Y1 = nothing
     GC.gc()
 
-    # ---- model (load checkpoint or build fresh) ----
-    model = build_model(spec_len, N_FG) # 562_041 parameters, takes like a minute for some reason
+    # ---- model (Lux.jl) ----
+    model = build_model(spec_len, N_FG)          # architecture (stateless)
+    rng = Xoshiro(42)
+    ps, st = Lux.setup(rng, model)                # init params + state
+    model = model |> dev
+    ps = fmap(x -> dev(x), ps)                     # params to GPU
+    st = fmap(x -> x isa AbstractArray ? dev(x) : x, st)
+
     if isfile(MODEL_PATH)
         saved_arch = JLD2.load(MODEL_PATH, "arch_version")
         if saved_arch != ARCH_VERSION
@@ -63,32 +87,36 @@ function main()
             rm(MODEL_PATH)
         end
     end
+
     if isfile(MODEL_PATH)
         println("\nLoading saved model from $MODEL_PATH ...")
-        cpu_state = JLD2.load(MODEL_PATH, "model_state")
-        Flux.loadmodel!(model, cpu_state)
+        ps = fmap(x -> dev(x), JLD2.load(MODEL_PATH, "params"))
+        st_cpu = JLD2.load(MODEL_PATH, "states")
+        st = fmap(x -> x isa AbstractArray ? dev(x) : x, st_cpu)
         println("  Loaded. Skipping training — delete $MODEL_PATH to retrain.")
     else
-        n_params = sum(length, Flux.trainable(model)) # this is severely wrong, fix later
+        n_params = count_params(ps)
         println("\nModel parameters: $n_params")
-        typeof(Xv)
-        typeof(Yv)
-        train_model!(model, CHUNKS, norm, Xv, Yv; epochs=50, lr_start=1.0f-3, lr_min=1.0f-6, patience=5)
+
+        ps, st = train_model!(model, ps, st, CHUNKS, norm, Xv, Yv;
+                              epochs=50, lr_start=1.0f-3, lr_min=1.0f-6, patience=5)
 
         println("\nSaving model → $MODEL_PATH")
+        cpu_dev = cpu_device()
         JLD2.save(MODEL_PATH,
-            "model_state", Flux.state(MLDataDevices.cpu_device()(model)),
+            "params",       fmap(x -> cpu_dev(x), ps),
+            "states",       fmap(x -> x isa AbstractArray ? cpu_dev(x) : x, st),
             "arch_version", ARCH_VERSION,
-            "fg_names", FG_NAMES,
-            "norm_mu", norm.μ,
-            "norm_sigma", norm.σ,
-            "spec_len", spec_len,
+            "fg_names",     FG_NAMES,
+            "norm_mu",      norm.μ,
+            "norm_sigma",   norm.σ,
+            "spec_len",     spec_len,
         )
         println("  Saved.")
     end
 
     # ---- test evaluation (batched to avoid VRAM OOM) ----
-    Flux.testmode!(model)
+    st = Lux.test_mode(st)
     test_loader = DataLoader((Xt, Yt), batchsize=256)
 
     all_pred = Vector{Matrix{Float32}}()
@@ -96,13 +124,14 @@ function main()
 
     for (Xb, Yb) in test_loader
         Xb_d = dev(Xb)
-        pred_b = MLDataDevices.cpu_device()(sigmoid.(model(Xb_d)))
+        y_pred, _ = model(Xb_d, ps, st)
+        pred_b = cpu_device()(sigmoid.(y_pred))
         push!(all_pred, pred_b)
         push!(all_true, Yb)
     end
 
     pred_cpu = hcat(all_pred...)
-    Yt_cpu = hcat(all_true...)
+    Yt_cpu  = hcat(all_true...)
 
     pred_bin = pred_cpu .> 0.5f0
     overall_acc = mean(pred_bin .== Yt_cpu)

@@ -18,7 +18,8 @@ println("Julia version: $(VERSION)")
 println("\n📦 Installing core dependencies...")
 Pkg.add([
     "DuckDB", "DBInterface", "DataFrames",
-    "Flux", "MLDataDevices", "Statistics", "Random", "Printf",
+    "Lux", "Enzyme", "Optimisers", "NNlib", "Functors",
+    "MLDataDevices", "Statistics", "Random", "Printf",
     "PythonCall", "MLUtils", "JLD2",
     "CondaPkg"
 ])
