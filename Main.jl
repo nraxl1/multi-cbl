@@ -3,13 +3,16 @@ using Pkg
 Pkg.activate(".")
 
 using DuckDB, DBInterface, DataFrames
-using Lux, Enzyme, Optimisers, NNlib
-using Statistics, Random, Printf
+using Lux, Reactant, Optimisers, Enzyme, Random
+using Statistics, Printf, NNlib
 using MLDataDevices
 using Functors: fmap
-using PythonCall, JLD2, CUDA, GPUArrays, Revise, ProgressMeter
+using PythonCall, JLD2, ProgressMeter, AbbreviatedStackTraces, DispatchDoctor
+using ADTypes
 using MLUtils: DataLoader
-import .GC
+import Base.GC
+
+const ARCH_VERSION = "rescnn-v7-flux-port"
 
 include("src/Featurization.jl")
 include("src/ModelNext.jl")
@@ -17,14 +20,16 @@ include("src/LoadData.jl")
 include("src/TrainingNext.jl")
 
 const CHUNKS = [
-    "src/parquet-files/data/IR_data_chunk00$(i)_of_009.parquet" for i in 1:9
+    "../../courses/multi-cbl/multi-cbl/parquet-files/data/IR_data_chunk00$(i)_of_009.parquet" for i in 7:7
 ]
 
 const CACHE_DIR = "chunk_cache"
 const MODEL_PATH = "model.jld2"
-const ARCH_VERSION = "rescnn-v2"
 
-CUDA.functional() && CUDA.allowscalar(false)
+# Seeding
+rng = Random.default_rng()
+Random.seed!(rng, 0)
+Random.TaskLocalRNG()
 
 # --- helpers ---
 
@@ -32,9 +37,9 @@ function count_params(x)
     if x isa AbstractArray
         return length(x)
     elseif x isa NamedTuple
-        return sum(count_params, values(x))
+        return isempty(x) ? 0 : sum(count_params, values(x))
     elseif x isa Tuple
-        return sum(count_params, x)
+        return isempty(x) ? 0 : sum(count_params, x)
     else
         return 0
     end
@@ -43,14 +48,12 @@ end
 # --- main ---
 
 function main()
-    Random.seed!(42)
-
-    dev = MLDataDevices.gpu_device()
+    Reactant.set_default_backend("gpu")
+    dev = reactant_device()
     @info "Using device: $dev"
 
     println("=== Bootstrapping from chunk 1 ===")
     X1, Y1, s1 = cached_load_chunk(CHUNKS[1])
-
     spec_len = size(X1, 1)
     println("\nSpectrum length: $spec_len  |  Labels: $N_FG")
     println("Label order: ", FG_NAMES)
@@ -72,13 +75,9 @@ function main()
     X1 = Y1 = nothing
     GC.gc()
 
-    # ---- model (Lux.jl) ----
-    model = build_model(spec_len, N_FG)          # architecture (stateless)
-    rng = Xoshiro(42)
-    ps, st = Lux.setup(rng, model)                # init params + state
-    model = model |> dev
-    ps = fmap(x -> dev(x), ps)                     # params to GPU
-    st = fmap(x -> x isa AbstractArray ? dev(x) : x, st)
+    # Build model and initialize
+    model = build_model(spec_len, N_FG)
+    parameters, state = Lux.setup(rng, model) |> dev
 
     if isfile(MODEL_PATH)
         saved_arch = JLD2.load(MODEL_PATH, "arch_version")
@@ -90,22 +89,22 @@ function main()
 
     if isfile(MODEL_PATH)
         println("\nLoading saved model from $MODEL_PATH ...")
-        ps = fmap(x -> dev(x), JLD2.load(MODEL_PATH, "params"))
+        parameters = fmap(x -> x |> dev, JLD2.load(MODEL_PATH, "params"))
         st_cpu = JLD2.load(MODEL_PATH, "states")
-        st = fmap(x -> x isa AbstractArray ? dev(x) : x, st_cpu)
+        state = fmap(x -> x isa AbstractArray ? x |> dev : x, st_cpu)
         println("  Loaded. Skipping training — delete $MODEL_PATH to retrain.")
     else
-        n_params = count_params(ps)
+        n_params = count_params(parameters)
         println("\nModel parameters: $n_params")
 
-        ps, st = train_model!(model, ps, st, CHUNKS, norm, Xv, Yv;
+        parameters, state = train_model!(model, parameters, state, CHUNKS, norm, Xv, Yv;
                               epochs=50, lr_start=1.0f-3, lr_min=1.0f-6, patience=5)
 
         println("\nSaving model → $MODEL_PATH")
         cpu_dev = cpu_device()
         JLD2.save(MODEL_PATH,
-            "params",       fmap(x -> cpu_dev(x), ps),
-            "states",       fmap(x -> x isa AbstractArray ? cpu_dev(x) : x, st),
+            "params",       fmap(cpu_dev, parameters),
+            "states",       fmap(x -> x isa AbstractArray ? cpu_dev(x) : x, state),
             "arch_version", ARCH_VERSION,
             "fg_names",     FG_NAMES,
             "norm_mu",      norm.μ,
@@ -116,15 +115,15 @@ function main()
     end
 
     # ---- test evaluation (batched to avoid VRAM OOM) ----
-    st = Lux.test_mode(st)
-    test_loader = DataLoader((Xt, Yt), batchsize=256)
+    state = Lux.testmode(state)
+    test_loader = DataLoader((Xt, Yt), batchsize=16)
 
     all_pred = Vector{Matrix{Float32}}()
     all_true = Vector{Matrix{Float32}}()
 
     for (Xb, Yb) in test_loader
-        Xb_d = dev(Xb)
-        y_pred, _ = model(Xb_d, ps, st)
+        Xb_d = Xb |> dev
+        y_pred, _ = @jit Lux.apply(model, Xb_d, parameters, state)
         pred_b = cpu_device()(sigmoid.(y_pred))
         push!(all_pred, pred_b)
         push!(all_true, Yb)
