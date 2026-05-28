@@ -2,6 +2,8 @@
 # TRAINING LOOP — Lux.jl + Reactant + Enzyme
 ############################################################
 using Functors: fmap
+using Lux
+using DispatchDoctor
 
 const CHECKPOINT_PATH = "checkpoint.jld2"
 
@@ -120,7 +122,7 @@ function train_model!(model, ps, st, chunk_paths::Vector{String},
         for (Xb, Yb) in dev(val_loader)
             # Xb = Xb |> dev
             # Yb = Yb |> dev
-            y_pred, _ = Lux.apply(train_state.model, Xb, train_state.parameters, st_val)
+            y_pred, _ = @jit Lux.apply(train_state.model, Xb, train_state.parameters, st_val)
             val_loss += loss_fn(y_pred, Yb)
             n_val += 1
         end

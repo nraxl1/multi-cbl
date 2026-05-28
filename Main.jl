@@ -11,13 +11,14 @@ using PythonCall, JLD2, ProgressMeter, AbbreviatedStackTraces, DispatchDoctor
 using ADTypes
 using MLUtils: DataLoader
 import Base.GC
+using IRSpectraML
 
 const ARCH_VERSION = "rescnn-v7-flux-port"
 
-include("src/Featurization.jl")
-include("src/ModelNext.jl")
-include("src/LoadData.jl")
-include("src/TrainingNext.jl")
+# include("src/Featurization.jl")
+# include("src/ModelNext.jl")
+# include("src/LoadData.jl")
+# include("src/TrainingNext.jl")
 
 const CHUNKS = [
     "../../courses/multi-cbl/multi-cbl/parquet-files/data/IR_data_chunk00$(i)_of_009.parquet" for i in 7:7
@@ -53,20 +54,20 @@ function main()
     @info "Using device: $dev"
 
     println("=== Bootstrapping from chunk 1 ===")
-    X1, Y1, s1 = cached_load_chunk(CHUNKS[1])
+    X1, Y1, s1 = IRSpectraML.cached_load_chunk(CHUNKS[1])
     spec_len = size(X1, 1)
-    println("\nSpectrum length: $spec_len  |  Labels: $N_FG")
-    println("Label order: ", FG_NAMES)
+    println("\nSpectrum length: $spec_len  |  Labels: $IRSpectraML.N_FG")
+    println("Label order: ", IRSpectraML.FG_NAMES)
 
     tr1 = findall(s -> s < 8, s1)
     val1 = findall(s -> s == 8, s1)
     tst1 = findall(s -> s == 9, s1)
 
-    norm = fit_normalizer(X1[:, tr1])
+    norm = IRSpectraML.fit_normalizer(X1[:, tr1])
 
-    Xv = apply_normalizer(norm, X1[:, val1])
+    Xv = IRSpectraML.apply_normalizer(norm, X1[:, val1])
     Yv = Y1[:, val1]
-    Xt = apply_normalizer(norm, X1[:, tst1])
+    Xt = IRSpectraML.apply_normalizer(norm, X1[:, tst1])
     Yt = Y1[:, tst1]
 
     println("Val: $(size(Xv,2))  Test: $(size(Xt,2))  (from chunk 1)")
@@ -76,7 +77,7 @@ function main()
     GC.gc()
 
     # Build model and initialize
-    model = build_model(spec_len, N_FG)
+    model = IRSpectraML.build_model(spec_len, IRSpectraML.N_FG)
     parameters, state = Lux.setup(rng, model) |> dev
 
     if isfile(MODEL_PATH)
@@ -97,7 +98,7 @@ function main()
         n_params = count_params(parameters)
         println("\nModel parameters: $n_params")
 
-        parameters, state = train_model!(model, parameters, state, CHUNKS, norm, Xv, Yv;
+        parameters, state = IRSpectraML.train_model!(model, parameters, state, CHUNKS, norm, Xv, Yv;
                               epochs=50, lr_start=1.0f-3, lr_min=1.0f-6, patience=5)
 
         println("\nSaving model → $MODEL_PATH")
@@ -106,7 +107,7 @@ function main()
             "params",       fmap(cpu_dev, parameters),
             "states",       fmap(x -> x isa AbstractArray ? cpu_dev(x) : x, state),
             "arch_version", ARCH_VERSION,
-            "fg_names",     FG_NAMES,
+            "fg_names",     IRSpectraML.FG_NAMES,
             "norm_mu",      norm.μ,
             "norm_sigma",   norm.σ,
             "spec_len",     spec_len,
@@ -149,7 +150,7 @@ function main()
     println("Overall accuracy: $(round(100*overall_acc, digits=2))%")
     println("Macro F1:         $(round(100*macro_f1, digits=2))%")
 
-    for (i, name) in enumerate(FG_NAMES)
+    for (i, name) in enumerate(IRSpectraML.FG_NAMES)
         acc_i = mean(pred_bin[i, :] .== Yt_cpu[i, :])
         @printf("  %-20s accuracy: %6.2f%%   F1: %6.2f%%\n", name, 100 * acc_i, 100 * f1[i])
     end

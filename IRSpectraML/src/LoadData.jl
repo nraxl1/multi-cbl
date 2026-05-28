@@ -119,3 +119,7 @@ function cached_load_chunk(parquet_path::String)
     println("  Saved cache → $cp")
     return X, Y, split_vec
 end
+
+# TODO: Construct training, validation, testing split, normalize within data sources (all data is in the form of a vector of a vector of file paths,
+# ) some sort of lazy loading maybe. return 3 DataLoader s ideally, (or a dataloader that loads a dataloader for lazyloading sake? can we bind a custom
+ # load function to a DataLoader? )

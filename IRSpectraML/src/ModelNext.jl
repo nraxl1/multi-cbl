@@ -152,20 +152,3 @@ function build_model(spec_len::Int, n_fg::Int)
 end
 
 
-#=
-╔══════════════════════════════════════════════════════════════╗
-║           ORIGINAL FLUX MODEL (kept for reference)          ║
-╚══════════════════════════════════════════════════════════════╝
-
-[... Flux.jl model code preserved as reference ...]
-
-The Lux port above differs from the Flux model in ONE way:
-- Flux uses Conv(stride=2) for spatial downsampling
-- This port uses Conv(stride=1) + MaxPool(stride=2)
-
-Reason: Reactant cannot trace strided convs across parallel paths
-inside ResBlocks (DimensionMismatch bug, see issue #1990).
-The MaxPool approach is functionally very similar — it computes
-dense convolutions then pools, rather than strided convolutions.
-This is a common and well-established ResNet variant.
-=#
