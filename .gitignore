@@ -34,3 +34,15 @@ Manifest.toml
 CondaPkg.toml
 .CondaPkg
 model*.jld2*
+
+.claude
+.CondaPkg
+.ocx
+.opencode
+.sisyphus
+.vscode
+*.json
+*.toml
+*.jld2
+DataAnalysis.html
+DataAnalysis.jmd

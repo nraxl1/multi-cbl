@@ -50,7 +50,7 @@ end
 
 function main()
     Reactant.set_default_backend("gpu")
-    dev = reactant_device()
+    dev = reactant_device(force=true)
     @info "Using device: $dev"
 
     println("=== Bootstrapping from chunk 1 ===")
