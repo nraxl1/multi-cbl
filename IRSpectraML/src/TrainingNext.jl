@@ -2,10 +2,12 @@
 # TRAINING LOOP — Lux.jl + Reactant + Enzyme
 ############################################################
 using Functors: fmap
-using Lux
+using Lux, Reactant, Optimisers
 using DispatchDoctor
 
 const CHECKPOINT_PATH = "checkpoint.jld2"
+
+const ARCH_VERSION = "lmao idk"
 
 # ──────────────────────────────────────────────────────────
 # Checkpointing
@@ -42,7 +44,7 @@ function maybe_load_checkpoint(model, dev, lr_start)
     ps = fmap(x -> x |> dev, ps_cpu)
     st = fmap(x -> x isa AbstractArray ? x |> dev : x, st_cpu)
 
-    train_state = Lux.Training.TrainState(model, ps, st, Optimisers.Adam(lr_start))
+    train_state = Lux.Training.TrainState(model, ps, st, Optimisers.AdamW(lr_start))
 
     println("  Resuming from epoch $(epoch+1), best val loss = $(round(best_loss, digits=4))")
     return (train_state, epoch, Float32(best_loss))
@@ -63,9 +65,14 @@ function train_model!(model, ps, st, chunk_paths::Vector{String},
 
     dev = reactant_device()
 
-    loss_fn = Lux.BinaryFocalLoss(; gamma = 0.6) # BinaryFocalLoss(; γ=0.6f0, ϵ=1f-6)
+    ps = fmap(dev, ps)
+    st = fmap(x -> x isa AbstractArray ? dev(x) : x, st)
 
-    opt = Optimisers.Adam(lr_start)
+    focal_loss = Lux.BinaryFocalLoss(gamma = 0.6) # BinaryFocalLoss(; γ=0.6f0, ϵ=1f-6)
+
+    loss_fn = GenericLossFunction((y_pred, y) -> focal_loss(sigmoid(clamp.(y_pred, Float32(-10), Float32(10))), y))
+
+    opt = Optimisers.AdamW(lr_start)
     train_state = Lux.Training.TrainState(model, ps, st, opt)
 
     # --- Resume from checkpoint ---
@@ -78,11 +85,18 @@ function train_model!(model, ps, st, chunk_paths::Vector{String},
         end
     end
 
-    val_loader = DataLoader((Xv, Yv), batchsize=32,
+    val_loader = DataLoader((Xv, Yv), batchsize=512,
                             partial=false, parallel=true)
 
-    for e in (start_epoch+1):epochs
+        (x0, y0) = first(val_loader) |> dev
+        model_compiled = @compile sync=true train_state.model(x0, train_state.parameters, Lux.testmode(train_state.states))
+        print("done compiling thingy")
+        prediction, _ = model_compiled(x0, train_state.parameters, Lux.testmode(train_state.states))
+        loss_fn_compiled = @compile sync=true loss_fn(prediction, y0)
 
+
+        for e in (start_epoch+1):epochs
+        GC.gc(true)
         # --- Cosine LR decay ---
         t = Float32(e - 1) / Float32(epochs - 1)
         lr = Float32(lr_min + 0.5f0 * (lr_start - lr_min) * (1f0 + cos(Float32(π) * t)))
@@ -95,23 +109,23 @@ function train_model!(model, ps, st, chunk_paths::Vector{String},
             Ytr = Y[:, tr_idx]
             perm = randperm(size(Xtr, 2))
             train_loader = DataLoader((Xtr[:, perm], Ytr[:, perm]),
-                                      batchsize=32, shuffle=false,
-                                      partial=false, parallel=true)
+                                      batchsize=512, shuffle=false,
+                                      partial=false, parallel=true) |> dev
 
-            for (x, y) in dev(train_loader)
+            for (x, y) in train_loader
                 # x = x |> dev
                 # y = y |> dev
 
                 # Compute gradients (updates st internally via Lux)
-                gs, loss_val, _, train_state = Lux.Training.compute_gradients(
-                    AutoEnzyme(),
+                _, loss_val, _, train_state = Lux.Training.single_train_step!(
+                    AutoReactant(),
                     loss_fn,
                     (x, y),
                     train_state
                 )
 
                 # Parameter update
-                train_state = Lux.Training.apply_gradients!(train_state, gs)
+                # train_state = Lux.Training.apply_gradients!(train_state, gs)
             end
         end
 
@@ -120,10 +134,15 @@ function train_model!(model, ps, st, chunk_paths::Vector{String},
         val_loss = 0f0
         n_val = 0
         for (Xb, Yb) in dev(val_loader)
-            # Xb = Xb |> dev
-            # Yb = Yb |> dev
-            y_pred, _ = @jit Lux.apply(train_state.model, Xb, train_state.parameters, st_val)
-            val_loss += loss_fn(y_pred, Yb)
+            Xb = Xb |> dev
+            Yb = Yb |> dev
+            y_pred, _ = Reactant.@time model_compiled(Xb, train_state.parameters, st_val)
+            show(typeof(y_pred))
+            y_pred = y_pred |> dev
+            # if loss_fn ==  Lux.BinaryFocalLoss(gamma = 0.6)
+            #    loss_fn = loss_fn(y_pred, Yb)
+            # end
+            val_loss += loss_fn_compiled(y_pred, Yb)
             n_val += 1
         end
         val_loss /= n_val
