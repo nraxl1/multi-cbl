@@ -152,3 +152,20 @@ function build_model(spec_len::Int, n_fg::Int)
 end
 
 
+# --- Utilities ---
+
+"""
+Count the number of scalar parameters in a Lux model's parameter tree.
+Handles Arrays, NamedTuples, and Tuples recursively.
+"""
+function count_params(x)
+    if x isa AbstractArray
+        return length(x)
+    elseif x isa NamedTuple
+        return isempty(x) ? 0 : sum(count_params, values(x))
+    elseif x isa Tuple
+        return isempty(x) ? 0 : sum(count_params, x)
+    else
+        return 0
+    end
+end

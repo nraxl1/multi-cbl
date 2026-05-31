@@ -123,3 +123,8 @@ end
 # TODO: Construct training, validation, testing split, normalize within data sources (all data is in the form of a vector of a vector of file paths,
 # ) some sort of lazy loading maybe. return 3 DataLoader s ideally, (or a dataloader that loads a dataloader for lazyloading sake? can we bind a custom
  # load function to a DataLoader? )
+
+function prepare_data(data_paths::Vector{Vector{AbstractString}}, fit_normalizer, )::Tuple{DataLoader, DataLoader, DataLoader}
+    if 
+    end
+end

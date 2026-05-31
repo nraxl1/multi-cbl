@@ -1,8 +1,9 @@
-############################################################
-# PARQUET DATASET VALIDATOR (MD5, ORDERED, STREAMING SAFE)
-# Matches hashes.txt line-by-line with chunk files
-############################################################
-import Pkg; Pkg.add("PythonCall")
+#!/usr/bin/env julia
+"""
+VerifyData.jl — Parquet dataset validator (MD5, ordered, streaming safe).
+Matches hashes.txt line-by-line with chunk files.
+"""
+
 using PythonCall
 
 # Python hashlib for MD5 (Julia stdlib does NOT include MD5)
@@ -12,20 +13,19 @@ hashlib = pyimport("hashlib")
 # CONFIG
 ############################################################
 
-DATA_DIR = "parquet-files/data"
-HASH_FILE = "parquet-files/hashes.txt"
+data_dir = joinpath(@__DIR__, "..", "src", "parquet-files", "data")
+DATA_DIR = normpath(data_dir)
+HASH_FILE = normpath(joinpath(@__DIR__, "..", "src", "parquet-files", "hashes.txt"))
 
 ############################################################
 # 1. MD5 HASH FUNCTION (STREAMING)
 ############################################################
 
 function hash_file_md5(path::String)
-
     md5 = hashlib.md5()
 
     open(path, "r") do io
         buf = Vector{UInt8}(undef, 1024^2)  # 1MB buffer
-
         while !eof(io)
             n = readbytes!(io, buf)
             md5.update(view(buf, 1:n))
@@ -41,13 +41,11 @@ end
 
 function load_hashes(path::String)
     hashes = String[]
-
     for line in eachline(path)
         h = strip(line)
         isempty(h) && continue
         push!(hashes, h)
     end
-
     return hashes
 end
 
@@ -56,16 +54,12 @@ end
 ############################################################
 
 function get_parquet_files(dir::String)
-
     files = readdir(dir)
-
     parquet_files = filter(f ->
         startswith(f, "IR_data_chunk") &&
         endswith(f, ".parquet")
     , files)
-
     sort!(parquet_files)
-
     return joinpath.(dir, parquet_files)
 end
 
@@ -74,19 +68,15 @@ end
 ############################################################
 
 function validate(files, expected_hashes)
-
     println("\n🔍 PARQUET MD5 VALIDATION START")
     println("Files:  ", length(files))
     println("Hashes: ", length(expected_hashes))
 
     n = min(length(files), length(expected_hashes))
-
     mismatches = 0
 
     for i in 1:n
-
         println("\nChecking chunk ", i, "...")
-
         actual = hash_file_md5(files[i])
         expected = expected_hashes[i]
 
@@ -101,7 +91,6 @@ function validate(files, expected_hashes)
         end
     end
 
-    # check size mismatch
     if length(files) != length(expected_hashes)
         println("\n⚠ SIZE MISMATCH")
         println("files  = ", length(files))
@@ -109,7 +98,6 @@ function validate(files, expected_hashes)
     end
 
     println("\n-------------------------")
-
     if mismatches == 0
         println("✅ ALL FILES VALID")
     else
@@ -122,12 +110,9 @@ end
 ############################################################
 
 function main()
-
     println("Loading dataset...")
-
     files = get_parquet_files(DATA_DIR)
     hashes = load_hashes(HASH_FILE)
-
     validate(files, hashes)
 end
 

@@ -88,14 +88,14 @@ function train_model!(model, ps, st, chunk_paths::Vector{String},
     val_loader = DataLoader((Xv, Yv), batchsize=512,
                             partial=false, parallel=true)
 
-        (x0, y0) = first(val_loader) |> dev
-        model_compiled = @compile sync=true train_state.model(x0, train_state.parameters, Lux.testmode(train_state.states))
-        print("done compiling thingy")
-        prediction, _ = model_compiled(x0, train_state.parameters, Lux.testmode(train_state.states))
-        loss_fn_compiled = @compile sync=true loss_fn(prediction, y0)
+    (x0, y0) = first(val_loader) |> dev
+    model_compiled = @compile sync=true train_state.model(x0, train_state.parameters, Lux.testmode(train_state.states))
+    print("done compiling thingy")
+    prediction, _ = model_compiled(x0, train_state.parameters, Lux.testmode(train_state.states))
+    loss_fn_compiled = @compile sync=true loss_fn(prediction, y0)
 
 
-        for e in (start_epoch+1):epochs
+    for e in (start_epoch+1):epochs
         GC.gc(true)
         # --- Cosine LR decay ---
         t = Float32(e - 1) / Float32(epochs - 1)
@@ -109,13 +109,10 @@ function train_model!(model, ps, st, chunk_paths::Vector{String},
             Ytr = Y[:, tr_idx]
             perm = randperm(size(Xtr, 2))
             train_loader = DataLoader((Xtr[:, perm], Ytr[:, perm]),
-                                      batchsize=512, shuffle=false,
+                                      batchsize=64, shuffle=false,
                                       partial=false, parallel=true) |> dev
 
             for (x, y) in train_loader
-                # x = x |> dev
-                # y = y |> dev
-
                 # Compute gradients (updates st internally via Lux)
                 _, loss_val, _, train_state = Lux.Training.single_train_step!(
                     AutoReactant(),
@@ -123,9 +120,6 @@ function train_model!(model, ps, st, chunk_paths::Vector{String},
                     (x, y),
                     train_state
                 )
-
-                # Parameter update
-                # train_state = Lux.Training.apply_gradients!(train_state, gs)
             end
         end
 
@@ -139,9 +133,6 @@ function train_model!(model, ps, st, chunk_paths::Vector{String},
             y_pred, _ = Reactant.@time model_compiled(Xb, train_state.parameters, st_val)
             show(typeof(y_pred))
             y_pred = y_pred |> dev
-            # if loss_fn ==  Lux.BinaryFocalLoss(gamma = 0.6)
-            #    loss_fn = loss_fn(y_pred, Yb)
-            # end
             val_loss += loss_fn_compiled(y_pred, Yb)
             n_val += 1
         end

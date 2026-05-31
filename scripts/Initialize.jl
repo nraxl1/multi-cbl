@@ -8,7 +8,7 @@ After running this, launch the project with: julia --project=. Main.jl
 
 using Pkg
 
-project_dir = dirname(@__FILE__)
+project_dir = dirname(@__DIR__)
 Pkg.activate(project_dir)
 
 println("🔧 Setting up MultiCBL project at: $project_dir")
@@ -50,9 +50,9 @@ gpu = detect_gpu_backend()
 if gpu === :metal
     println("\n🍎 Apple Silicon detected — installing Metal.jl...")
     Pkg.add("Metal")
-    
+
     using Metal
-    
+
 elseif gpu === :cuda
     println("\n🎮 NVIDIA GPU detected — installing CUDA.jl + cuDNN.jl...")
     Pkg.add("CUDA")

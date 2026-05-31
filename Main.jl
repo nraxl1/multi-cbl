@@ -15,11 +15,6 @@ using IRSpectraML
 
 const ARCH_VERSION = "rescnn-v7-flux-port"
 
-# include("src/Featurization.jl")
-# include("src/ModelNext.jl")
-# include("src/LoadData.jl")
-# include("src/TrainingNext.jl")
-
 const CHUNKS = [
     "../../courses/multi-cbl/multi-cbl/parquet-files/data/IR_data_chunk00$(i)_of_009.parquet" for i in 7:7
 ]
@@ -31,20 +26,6 @@ const MODEL_PATH = "model.jld2"
 rng = Random.default_rng()
 Random.seed!(rng, 0)
 Random.TaskLocalRNG()
-
-# --- helpers ---
-
-function count_params(x)
-    if x isa AbstractArray
-        return length(x)
-    elseif x isa NamedTuple
-        return isempty(x) ? 0 : sum(count_params, values(x))
-    elseif x isa Tuple
-        return isempty(x) ? 0 : sum(count_params, x)
-    else
-        return 0
-    end
-end
 
 # --- main ---
 
@@ -95,7 +76,7 @@ function main()
         state = fmap(x -> x isa AbstractArray ? x |> dev : x, st_cpu)
         println("  Loaded. Skipping training — delete $MODEL_PATH to retrain.")
     else
-        n_params = count_params(parameters)
+        n_params = IRSpectraML.count_params(parameters)
         println("\nModel parameters: $n_params")
 
         parameters, state = IRSpectraML.train_model!(model, parameters, state, CHUNKS, norm, Xv, Yv;
