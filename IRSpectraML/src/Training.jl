@@ -1,25 +1,35 @@
 ############################################################
-# TRAINING LOOP — Lux.jl + Reactant + Enzyme
+# TRAINING LOOP — Lux.jl + Reactant (CPU backend for now)
 #
 # Two task heads supported:
 #   * Plastic classification (mutually exclusive, N_PLASTIC classes)
 #   * (Kept commented) Functional-group multi-label prediction
 #
 # Public entry points:
-#   * train_plastic_model!(...)    — classification
+#   * train_plastic_model!(...)    — classification, Reactant-CPU
 #   * train_model!(...)            — legacy multi-label (commented out)
+#
+# Backend: Reactant on CPU. To switch to GPU on a CUDA box, change
+# `Reactant.set_default_backend("cpu")` to "gpu" in Main.jl — the rest of
+# the code is identical (the model and loss are backend-agnostic).
+#
+# IMPORTANT: Lux's `CrossEntropyLoss` expects one-hot encoded targets
+# (n_classes, batch), not integer class indices. We use OneHotArrays and
+# JIT the onehotbatch call alongside the model so Reactant can trace
+# through the dtype conversion (see LuxDL/Lux.jl#1556).
 ############################################################
 using Functors: fmap
-using Lux, Reactant, Optimisers
+using Lux, Reactant, Optimisers, OneHotArrays
 using DispatchDoctor
+using Random: shuffle as _shuffle
 
 const CHECKPOINT_PATH = "checkpoint.jld2"
 const PLASTIC_CHECKPOINT_PATH = "plastic_model.jld2"
 
-const ARCH_VERSION = "plastic-v1-3k-classifier"
+const ARCH_VERSION = "plastic-v1-3k-classifier-reactant-cpu"
 
 # ──────────────────────────────────────────────────────────
-# Checkpointing (shared, version-gated)
+# Checkpointing (version-gated)
 # ──────────────────────────────────────────────────────────
 
 function save_plastic_checkpoint(train_state, epoch, best_val_acc, label_names)
@@ -76,18 +86,27 @@ end
 
 
 # ──────────────────────────────────────────────────────────
-# Plastic classification training
+# Plastic classification training (Reactant-CPU)
 # ──────────────────────────────────────────────────────────
 
 """
     train_plastic_model!(model, ps, st, X_tr, Y_tr, X_val, Y_val;
                          X_te=nothing, Y_te=nothing,
                          epochs=30, lr_start=1f-3, lr_min=1f-6,
-                         batchsize=64, patience=8, resume=true, label_names=PLASTIC_TYPES)
+                         batchsize=64, patience=8, resume=true,
+                         label_names=PLASTIC_TYPES, dev=reactant_device())
 
 Train a 6-way plastic classifier. Uses cross-entropy loss with logits,
-cosine LR decay, early stopping on validation accuracy, and a Reactant-compiled
-inner loop.
+cosine LR decay, early stopping on validation accuracy, and Reactant for
+XLA compilation (currently on the CPU backend).
+
+Device: defaults to `reactant_device()`. The model + loss + onehot are
+JIT-compiled once at the start of training via `@compile sync=true`, then
+reused across all batches.
+
+To switch to GPU on a CUDA box:
+  Reactant.set_default_backend("gpu")   # before calling main()
+  ... rest of the code is identical
 """
 function train_plastic_model!(model, ps, st,
                               X_tr::Matrix{Float32}, Y_tr::Vector{Int},
@@ -100,9 +119,9 @@ function train_plastic_model!(model, ps, st,
                               batchsize::Int=64,
                               patience::Int=8,
                               resume::Bool=true,
-                              label_names::Vector{String}=PLASTIC_TYPES)
+                              label_names::Vector{String}=PLASTIC_TYPES,
+                              dev::Any=reactant_device())
 
-    dev = reactant_device()
     ps = fmap(dev, ps)
     st = fmap(x -> x isa AbstractArray ? dev(x) : x, st)
 
@@ -122,18 +141,49 @@ function train_plastic_model!(model, ps, st,
         end
     end
 
-    val_loader = DataLoader((X_val, Y_val), batchsize=512, partial=false, parallel=true)
-
-    # Compile model and loss once with a sample input
-    (x0, y0) = first(val_loader) |> dev
-    model_compiled = @compile sync=true train_state.model(x0, train_state.parameters, Lux.testmode(train_state.states))
-    _pred, _ = model_compiled(x0, train_state.parameters, Lux.testmode(train_state.states))
-    loss_fn_compiled = @compile sync=true loss_fn(_pred, y0)
-    print("done compiling thingy\n")
-
     n_train = size(X_tr, 2)
     n_val   = size(X_val, 2)
-    println("Training: $n_train samples, Val: $n_val samples, batch=$batchsize, epochs=$epochs")
+    n_classes = length(label_names)
+
+    # --- JIT-compile model + loss + onehot once on a sample input ---
+    sample_x = X_tr[:, 1:min(batchsize, n_train)] |> dev
+    sample_y_int = Y_tr[1:min(batchsize, n_train)] |> dev
+    @info "JIT-compiling model + loss + onehot with Reactant (one-time cost)..."
+    t_compile = time()
+
+    # Wrap onehot in a closure so the UnitRange is captured (XLA traces the
+    # signature of a single argument — see LuxDL/Lux.jl#1556).
+    onehot_fn = let classes = 0:(n_classes-1)
+        y -> onehotbatch(y, classes)
+    end
+    onehot_compiled = @compile sync=true onehot_fn(sample_y_int)
+
+    sample_y_oh = onehot_compiled(sample_y_int)
+    model_compiled = @compile sync=true train_state.model(sample_x, train_state.parameters, Lux.testmode(train_state.states))
+    _pred, _ = model_compiled(sample_x, train_state.parameters, Lux.testmode(train_state.states))
+    loss_fn_compiled = @compile sync=true loss_fn(_pred, sample_y_oh)
+    println("  compiled in $(round(time() - t_compile, digits=1))s")
+
+    println("Training: $n_train samples, Val: $n_val samples, batch=$batchsize, epochs=$epochs, dev=$(typeof(dev))")
+
+    # Last-batch-safe loop: drop the tail batch if smaller than batchsize so
+    # the JIT'd onehot/model don't see a different shape than they were
+    # compiled for. We require batchsize to divide both splits cleanly; if
+    # it doesn't, we auto-truncate to the largest multiple of batchsize.
+    if n_train % batchsize != 0
+        @warn "n_train ($n_train) not divisible by batchsize ($batchsize); truncating last batch"
+    end
+    if n_val % batchsize != 0
+        @warn "n_val ($n_val) not divisible by batchsize ($batchsize); truncating last batch"
+    end
+    last_full_train = (n_train ÷ batchsize) * batchsize
+    last_full_val   = (n_val   ÷ batchsize) * batchsize
+    last_full_val   = max(last_full_val, 0)
+    n_train = last_full_train
+    n_val   = last_full_val
+    if n_val == 0
+        @warn "Validation set is empty after truncation; skipping val eval"
+    end
 
     for e in (start_epoch+1):epochs
         GC.gc(true)
@@ -145,40 +195,47 @@ function train_plastic_model!(model, ps, st,
 
         # --- Train one epoch (single pass over the data, batched) ---
         perm = randperm(n_train)
-        train_loader = DataLoader((X_tr[:, perm], Y_tr[perm]),
-                                  batchsize=batchsize, shuffle=false,
-                                  partial=false, parallel=true) |> dev
-
         epoch_loss = 0f0
         n_batches = 0
-        for (x, y) in train_loader
+        for i in 1:batchsize:n_train
+            idx = perm[i:min(i+batchsize-1, n_train)]
+            xb = X_tr[:, idx] |> dev
+            yb_int = Y_tr[idx] |> dev
+            yb = onehot_compiled(yb_int)  # one-hot on the Reactant device
+
+            # Single train step: forward + backward + apply update (Reactant handles AD)
             _, loss_val, _, train_state = Lux.Training.single_train_step!(
                 AutoReactant(),
                 loss_fn,
-                (x, y),
+                (xb, yb),
                 train_state
             )
+
             epoch_loss += loss_val
             n_batches += 1
         end
         train_loss = epoch_loss / max(n_batches, 1)
 
-        # --- Validation ---
+        # --- Validation (uses pre-compiled model + onehot) ---
         st_val = Lux.testmode(train_state.states)
         val_loss = 0f0
         val_correct = 0
         val_count = 0
-        for (Xb, Yb) in dev(val_loader)
-            Xb = Xb |> dev
-            Yb = Yb |> dev
-            y_pred, _ = model_compiled(Xb, train_state.parameters, st_val)
-            val_loss += loss_fn_compiled(y_pred, Yb)
-            # accuracy on GPU
-            val_correct += Int(sum(argmax.(eachcol(y_pred)) .== Yb))
-            val_count  += length(Yb)
+        if n_val > 0
+            for i in 1:batchsize:n_val
+                idx = i:min(i+batchsize-1, n_val)
+                Xb = X_val[:, idx] |> dev
+                Yb_int = Y_val[idx] |> dev
+                Yb_oh = onehot_compiled(Yb_int)
+                y_logits, _ = model_compiled(Xb, train_state.parameters, st_val)
+                val_loss += loss_fn_compiled(y_logits, Yb_oh)
+                # argmax on ConcreteRArray
+                val_correct += Int(sum(argmax.(eachcol(y_logits)) .== (Y_val[idx])))
+                val_count  += length(Y_val[idx])
+            end
+            val_loss /= max(ceil(Int, n_val / batchsize), 1)
         end
-        val_loss /= max(length(val_loader), 1)
-        val_acc   = val_count > 0 ? Float32(val_correct / val_count) : 0f0
+        val_acc   = val_count > 0 ? Float32(val_correct / val_count) : -1f0
 
         @printf("Epoch %2d | train_loss=%.4f | val_loss=%.4f | val_acc=%5.2f%% | lr=%.2e\n",
                 e, train_loss, val_loss, 100 * val_acc, lr)
@@ -213,7 +270,8 @@ end
 
 # ──────────────────────────────────────────────────────────
 # Legacy multi-label training loop (SMILES / functional groups)
-# Kept for the contrastive pretraining pipeline (Phase 1).
+# Kept for the contrastive pretraining pipeline (Phase 1) — will be
+# re-enabled on a CUDA machine with the Reactant GPU backend.
 # ──────────────────────────────────────────────────────────
 #=
 function save_checkpoint(train_state, epoch, best_val_loss)
@@ -263,12 +321,10 @@ function train_model!(model, ps, st, chunk_paths::Vector{String},
                       resume=true)
 
     dev = reactant_device()
-
     ps = fmap(dev, ps)
     st = fmap(x -> x isa AbstractArray ? dev(x) : x, st)
 
     focal_loss = Lux.BinaryFocalLoss(gamma = 0.6)
-
     loss_fn = GenericLossFunction((y_pred, y) -> focal_loss(sigmoid(clamp.(y_pred, Float32(-10), Float32(10))), y))
 
     opt = Optimisers.AdamW(lr_start)
@@ -283,8 +339,7 @@ function train_model!(model, ps, st, chunk_paths::Vector{String},
         end
     end
 
-    val_loader = DataLoader((Xv, Yv), batchsize=512,
-                            partial=false, parallel=true)
+    val_loader = DataLoader((Xv, Yv), batchsize=512, partial=false, parallel=true)
 
     (x0, y0) = first(val_loader) |> dev
     model_compiled = @compile sync=true train_state.model(x0, train_state.parameters, Lux.testmode(train_state.states))
@@ -292,14 +347,13 @@ function train_model!(model, ps, st, chunk_paths::Vector{String},
     prediction, _ = model_compiled(x0, train_state.parameters, Lux.testmode(train_state.states))
     loss_fn_compiled = @compile sync=true loss_fn(prediction, y0)
 
-
     for e in (start_epoch+1):epochs
         GC.gc(true)
         t = Float32(e - 1) / Float32(epochs - 1)
         lr = Float32(lr_min + 0.5f0 * (lr_start - lr_min) * (1f0 + cos(Float32(π) * t)))
         Optimisers.adjust!(train_state.optimizer_state, lr)
 
-        for path in shuffle(chunk_paths)
+        for path in _shuffle(chunk_paths)
             X, Y, s = cached_load_chunk(path)
             tr_idx = findall(sv -> sv < 8, s)
             Xtr = apply_normalizer(norm, X[:, tr_idx])
@@ -326,7 +380,6 @@ function train_model!(model, ps, st, chunk_paths::Vector{String},
             Xb = Xb |> dev
             Yb = Yb |> dev
             y_pred, _ = Reactant.@time model_compiled(Xb, train_state.parameters, st_val)
-            show(typeof(y_pred))
             y_pred = y_pred |> dev
             val_loss += loss_fn_compiled(y_pred, Yb)
             n_val += 1

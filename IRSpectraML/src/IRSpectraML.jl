@@ -1,11 +1,13 @@
 module IRSpectraML
 
 import PythonCall, CondaPkg
-using PythonCall, CondaPkg, Lux, Enzyme, Reactant
+using PythonCall, CondaPkg, Lux, Enzyme, Reactant, Optimisers, OneHotArrays
 using Random, Printf, JLD2, Statistics
-using Optimisers, MLUtils, NNlib, DispatchDoctor
+using MLUtils, NNlib, DispatchDoctor, MLDataDevices
 using DataInterpolations: LinearInterpolation, ExtrapolationType
 using Lux: CrossEntropyLoss
+using Lux.Training: AutoEnzyme, compute_gradients, apply_gradients!,
+                    AutoReactant, single_train_step!
 
 include_files = ["Featurization.jl", "LoadData.jl", "Model.jl", "Training.jl"]
 for filename in include_files

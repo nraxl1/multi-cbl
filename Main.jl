@@ -2,6 +2,7 @@ using Pkg
 Pkg.activate("IRSpectraML")  # activate the package env that has Lux + Reactant
 
 using Lux, Reactant, Optimisers, Enzyme, Random
+using OneHotArrays
 using Statistics, Printf, NNlib
 using MLDataDevices
 using Functors: fmap
@@ -67,8 +68,11 @@ function per_class_metrics(cm::Matrix{Int})
     return (acc=acc, prec=prec, rec=rec, f1=f1, macro_f1=mean(f1))
 end
 
-"Batched evaluation: returns (loss, accuracy, y_true, y_pred)."
-function evaluate(model, ps, st, X::Matrix{Float32}, Y::Vector{Int}; batchsize=512, dev=cpu_device())
+"Batched evaluation: returns (loss, accuracy, y_true, y_pred).
+Note: y_true is converted to one-hot internally for the loss, but the
+function returns the original integer labels in y_true for the confusion
+matrix downstream."
+function evaluate(model, ps, st, X::Matrix{Float32}, Y::Vector{Int}; batchsize=512, dev=cpu_device(), n_classes=IRSpectraML.N_PLASTIC)
     n = size(X, 2)
     loss_fn = CrossEntropyLoss(; logits=true)
     total_loss = 0f0
@@ -79,10 +83,16 @@ function evaluate(model, ps, st, X::Matrix{Float32}, Y::Vector{Int}; batchsize=5
     for i in 1:batchsize:n
         idx = i:min(i+batchsize-1, n)
         Xb = X[:, idx] |> dev
-        Yb = Y[idx]
+        Yb_int = Y[idx]
         y_logits, _ = model(Xb, ps, state)
-        total_loss += loss_fn(y_logits, Yb)
-        append!(y_true, Yb)
+        # Build one-hot on the same device as the logits
+        Yb_oh = onehotbatch(Yb_int, 0:(n_classes-1)) |> dev
+        # Fall back to plain Array if dev is cpu_device (onehotbatch is on CPU)
+        if dev === cpu_device()
+            Yb_oh = onehotbatch(Yb_int, 0:(n_classes-1))
+        end
+        total_loss += loss_fn(y_logits, Yb_oh)
+        append!(y_true, Yb_int)
         append!(y_pred, argmax.(eachcol(y_logits)))
         n_batches += 1
     end
@@ -96,9 +106,11 @@ end
 # ──────────────────────────────────────────────────────────
 
 function main()
-    Reactant.set_default_backend("gpu")
-    dev = reactant_device(force=true)
-    @info "Using device: $dev"
+    # Reactant on CPU for now. To switch to GPU on a CUDA box, change
+    # "cpu" to "gpu" — the rest of the training code is identical.
+    Reactant.set_default_backend("cpu")
+    dev = reactant_device()
+    @info "Using device: $dev (Reactant backend: $(Reactant.XLA.default_backend()))"
 
     # --- 1) Load data ---
     println("=== Loading plastic data ===")
@@ -166,6 +178,7 @@ function main()
             patience  = 8,
             resume    = true,
             label_names = IRSpectraML.PLASTIC_TYPES,
+            dev       = dev,
         )
 
         println("\nSaving model → $PLASTIC_MODEL")
