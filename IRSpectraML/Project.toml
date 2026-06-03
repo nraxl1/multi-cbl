@@ -6,6 +6,7 @@ authors = ["nraxl1 <haha@idk.lol>"]
 [deps]
 ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
 CondaPkg = "992eb4ea-22a4-4c89-a5bb-47a3300528ab"
+DataInterpolations = "82cc6244-b520-54b8-b5a6-8a565e85f1d0"
 DBInterface = "a10d1c49-ce27-4219-8d33-6db1a4562965"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 DispatchDoctor = "8d63f2c5-f18a-4cf2-ba9d-b3f60fc568c8"

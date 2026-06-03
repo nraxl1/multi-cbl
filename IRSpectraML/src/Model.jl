@@ -121,34 +121,53 @@ end
 # --- Model builder ---
 #
 # Spatial progression:  12000 → 3000 → 1500 → 750 → 375 → 188 → 94
+#                       3000 → 750  → 375 → 188 → 94  → 47  → 24  (for 3K input)
 # Channel progression:   1 → 32 → 32 → 64 → 64 → 128 → 128
-# Flatten:              128 × 94 = 12032
-# Dense:                12032 → 256 → 5
+# Flatten:              128 × 94 = 12032  (12K input)
+#                       128 × 24 = 3072   (3K input)
+# Dense:                → 256 → n_outputs
+#
+# `n_outputs` is task-specific:
+#   - 5 for the legacy functional-group multi-label head (smiles pipeline)
+#   - N_PLASTIC (= 6) for the mutually-exclusive plastic classifier
+# The model itself doesn't care — just the loss head and label format.
 
-function build_model(spec_len::Int, n_fg::Int)
+function build_model(spec_len::Int, n_outputs::Int; n_spatial::Int=94)
     model = Lux.Chain(
         SpecReshapeLayer(spec_len),
 
-    # Initial stride-4 reduction: Conv(stride=1, pad=15) + MaxPool(stride=4)
-    # SamePad ensures ceil(12000/4) = 3000 (matches stride-4 conv)
-    Lux.Conv((31,), 1 => 32; stride=1, pad=15),
-    Lux.MaxPool((4,); stride=4, pad=Lux.SamePad()),
+        # Initial stride-4 reduction: Conv(stride=1, pad=15) + MaxPool(stride=4)
+        # SamePad ensures ceil(input/4) matches what a stride-4 conv would give
+        Lux.Conv((31,), 1 => 32; stride=1, pad=15),
+        Lux.MaxPool((4,); stride=4, pad=Lux.SamePad()),
         Lux.BatchNorm(32),
         Lux.WrappedFunction(relu),
 
         # 5 ResBlocks with skip connections
-        ResBlock(32, 32;   stride=2),   # 3000 → 1500
-        ResBlock(32, 64;   stride=2),   # 1500 → 750
-        ResBlock(64, 64;   stride=2),   # 750  → 375
-        ResBlock(64, 128;  stride=2),   # 375  → 188
-        ResBlock(128, 128; stride=2),   # 188  → 94
+        ResBlock(32, 32;   stride=2),
+        ResBlock(32, 64;   stride=2),
+        ResBlock(64, 64;   stride=2),
+        ResBlock(64, 128;  stride=2),
+        ResBlock(128, 128; stride=2),
 
         FlattenLayer(),
-        Lux.Dense(128 * 94 => 256, relu),
+        Lux.Dense(128 * n_spatial => 256, relu),
         Lux.Dropout(0.3f0),
-        Lux.Dense(256 => n_fg),
+        Lux.Dense(256 => n_outputs),
     )
     return model
+end
+
+# Backwards-compatible convenience builder: 12K input, multi-label FG
+# (Kept so the contrastive/smiles pipeline can be re-enabled without rewriting)
+function build_model_fg(spec_len::Int, n_fg::Int)
+    return build_model(spec_len, n_fg; n_spatial=94)
+end
+
+# Plastic classifier builder: 3K input, mutually exclusive 6-class output
+# Final dense has no activation; softmax is applied inside the loss.
+function build_plastic_model(spec_len::Int=3000; n_classes::Int=N_PLASTIC, n_spatial::Int=24)
+    return build_model(spec_len, n_classes; n_spatial=n_spatial)
 end
 
 
