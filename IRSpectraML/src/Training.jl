@@ -36,12 +36,12 @@ function save_plastic_checkpoint(train_state, epoch, best_val_acc, label_names)
     println("  Saving plastic checkpoint at epoch $epoch (val acc = $(round(100*best_val_acc, digits=2))%)")
     cpu_dev = cpu_device()
     JLD2.save(PLASTIC_CHECKPOINT_PATH,
-        "params",        fmap(cpu_dev, train_state.parameters),
-        "states",        fmap(x -> x isa AbstractArray ? cpu_dev(x) : x, train_state.states),
-        "epoch",         epoch,
-        "best_val_acc",  best_val_acc,
-        "arch_version",  ARCH_VERSION,
-        "label_names",   label_names,
+        "params", fmap(cpu_dev, train_state.parameters),
+        "states", fmap(x -> x isa AbstractArray ? cpu_dev(x) : x, train_state.states),
+        "epoch", epoch,
+        "best_val_acc", best_val_acc,
+        "arch_version", ARCH_VERSION,
+        "label_names", label_names,
     )
 end
 
@@ -56,10 +56,10 @@ function maybe_load_plastic_checkpoint(model, dev, lr_start)
 
     println("Resuming plastic model from $PLASTIC_CHECKPOINT_PATH ...")
 
-    ps_cpu     = JLD2.load(PLASTIC_CHECKPOINT_PATH, "params")
-    st_cpu     = JLD2.load(PLASTIC_CHECKPOINT_PATH, "states")
-    epoch      = JLD2.load(PLASTIC_CHECKPOINT_PATH, "epoch")
-    best_acc   = JLD2.load(PLASTIC_CHECKPOINT_PATH, "best_val_acc")
+    ps_cpu = JLD2.load(PLASTIC_CHECKPOINT_PATH, "params")
+    st_cpu = JLD2.load(PLASTIC_CHECKPOINT_PATH, "states")
+    epoch = JLD2.load(PLASTIC_CHECKPOINT_PATH, "epoch")
+    best_acc = JLD2.load(PLASTIC_CHECKPOINT_PATH, "best_val_acc")
 
     ps = fmap(x -> x |> dev, ps_cpu)
     st = fmap(x -> x isa AbstractArray ? x |> dev : x, st_cpu)
@@ -80,9 +80,69 @@ end
 Returns mean accuracy.
 """
 function classification_accuracy(logits::AbstractMatrix, y_true::AbstractVector{<:Integer})
-    pred = [argmax(view(logits, :, i)) for i in 1:size(logits, 2)]
+    # argmax on a column returns a 1-based index; labels are 0-indexed,
+    # so shift down by 1 to compare apples-to-apples.
+    pred = [argmax(view(logits, :, i)) - 1 for i in 1:size(logits, 2)]
     return Float32(mean(pred .== y_true))
 end
+
+
+# ──────────────────────────────────────────────────────────
+# BN running-stat refresh (unsupervised domain adaptation)
+# ──────────────────────────────────────────────────────────
+
+#=
+"""
+    adapt_bn_stats!(model, ps, st, X, Y; batchsize=32, n_passes=3, dev=cpu_device())
+
+Recalibrate BatchNorm `running_mean` / `running_var` to a target
+distribution. Sets the model to `trainmode` (so BN updates its running
+stats from batch statistics via the standard momentum), runs `n_passes`
+forward passes over `(X, Y)` with no gradient, then returns the
+updated state.
+
+Use this to bridge a small distribution shift between training and
+target domains (e.g., recalibrate to a different spectrometer). No
+labels are used for the optimization itself — they're just passed
+through for shape consistency.
+
+Data should be a *mix* of source and target domains if you want the
+refreshed stats to remain usable on both; pure target-domain data
+will make the model lab-specific and hurt source-domain performance.
+
+NOTE: currently disabled — Reactant intercepts the trainmode forward
+path in this setup. See Main.jl comment block for the call site that
+this would feed back into.
+"""
+function adapt_bn_stats!(model, ps, st,
+                        X::Matrix{Float32}, Y::Vector{Int};
+                        batchsize::Int=32, n_passes::Int=3)
+    # Reactant can't trace a plain non-JIT forward in trainmode (the
+    # conv im2col path needs CPU pointers), so we work on plain CPU
+    # arrays. Lux's BatchNorm in trainmode without an autodiff context
+    # takes a slow path; we pay the JIT cost once via @compile and
+    # reuse the compiled function for all batches.
+    ps_cpu = fmap(x -> x isa AbstractArray ? Array(x) : x, ps)
+    st_cpu = fmap(x -> x isa AbstractArray ? Array(x) : x, st)
+    st_train = Lux.trainmode(st_cpu)
+
+    # JIT-compile a sample forward so subsequent calls are fast.
+    sample_x = X[:, 1:min(batchsize, size(X, 2))]
+    compiled = @compile sync=true model(sample_x, ps_cpu, st_train)
+    _, st_train = compiled(sample_x, ps_cpu, st_train)   # one warmup
+
+    n = size(X, 2)
+    for pass in 1:n_passes
+        perm = randperm(n)
+        for i in 1:batchsize:n
+            idx = perm[i:min(i+batchsize-1, n)]
+            xb = X[:, idx]
+            _, st_train = compiled(xb, ps_cpu, st_train)   # forward only
+        end
+    end
+    return st_train
+end
+=#
 
 
 # ──────────────────────────────────────────────────────────
@@ -109,26 +169,53 @@ To switch to GPU on a CUDA box:
   ... rest of the code is identical
 """
 function train_plastic_model!(model, ps, st,
-                              X_tr::Matrix{Float32}, Y_tr::Vector{Int},
-                              X_val::Matrix{Float32}, Y_val::Vector{Int};
-                              X_te::Union{Matrix{Float32},Nothing}=nothing,
-                              Y_te::Union{Vector{Int},Nothing}=nothing,
-                              epochs::Int=30,
-                              lr_start::Float32=1f-3,
-                              lr_min::Float32=1f-6,
-                              batchsize::Int=64,
-                              patience::Int=8,
-                              resume::Bool=true,
-                              label_names::Vector{String}=PLASTIC_TYPES,
-                              dev::Any=reactant_device())
+    X_tr::Matrix{Float32}, Y_tr::Vector{Int},
+    X_val::Matrix{Float32}, Y_val::Vector{Int};
+    X_te::Union{Matrix{Float32},Nothing}=nothing,
+    Y_te::Union{Vector{Int},Nothing}=nothing,
+    epochs::Int=30,
+    lr_start::Float32=1f-3,
+    lr_min::Float32=1f-6,
+    batchsize::Int=64,
+    patience::Int=8,
+    resume::Bool=true,
+    force::Bool=false,
+    entropy::Float32=0f0,
+    label_names::Vector{String}=PLASTIC_TYPES,
+    dev::Any=reactant_device())
+
+    best_val_loss = Inf32
+    min_delta = 5f-5
+    epochs_no_improve = 0
 
     ps = fmap(dev, ps)
     st = fmap(x -> x isa AbstractArray ? dev(x) : x, st)
 
-    # Cross-entropy on raw logits
+    # Cross-entropy on raw logits, optionally with an entropy regularizer
+    # (pushes the softmax output toward uniform, dampens overconfidence).
+    # `entropy` (λ) is captured by the closure so it is baked into the
+    # JIT-compiled loss at compile time. λ=0 → pure cross-entropy, identical
+    # to the previous behavior.
     loss_fn = CrossEntropyLoss(; logits=true)
-
-    opt = Optimisers.AdamW(lr_start)
+    λ = Float32(entropy)
+    # loss_fn = if λ > 0
+    #    (logits, y_oh) -> begin
+    #        ce = ce_fn(logits, y_oh)
+    #        # Numerically stable softmax: subtract max before exp
+    #        m    = maximum(logits; dims=1)
+    #        z    = exp.(logits .- m)
+    #        p    = z ./ sum(z; dims=1)
+    #        # Mean per-sample entropy over the batch: H = -Σ p log p
+    #        # ε floor keeps log defined when a class probability is 0.
+    #        # Note: don't wrap with Float32(...) — that fails inside the
+    #        # XLA trace (Float32(::TracedRNumber) is undefined).
+    #        H    = -mean(sum(p .* log.(p .+ 1f-8); dims=1))
+    #        ce + λ * H
+    #    end
+    # else
+    #    ce_fn
+    # end
+    opt = Optimisers.AdamW(lr_start, (0.01f0, 0.01f0))
     train_state = Lux.Training.TrainState(model, ps, st, opt)
 
     # --- Resume from checkpoint ---
@@ -142,7 +229,7 @@ function train_plastic_model!(model, ps, st,
     end
 
     n_train = size(X_tr, 2)
-    n_val   = size(X_val, 2)
+    n_val = size(X_val, 2)
     n_classes = length(label_names)
 
     # --- JIT-compile model + loss + onehot once on a sample input ---
@@ -156,12 +243,12 @@ function train_plastic_model!(model, ps, st,
     onehot_fn = let classes = 0:(n_classes-1)
         y -> onehotbatch(y, classes)
     end
-    onehot_compiled = @compile sync=true onehot_fn(sample_y_int)
+    onehot_compiled = @compile sync = true onehot_fn(sample_y_int)
 
     sample_y_oh = onehot_compiled(sample_y_int)
-    model_compiled = @compile sync=true train_state.model(sample_x, train_state.parameters, Lux.testmode(train_state.states))
+    model_compiled = @compile sync = true train_state.model(sample_x, train_state.parameters, Lux.testmode(train_state.states))
     _pred, _ = model_compiled(sample_x, train_state.parameters, Lux.testmode(train_state.states))
-    loss_fn_compiled = @compile sync=true loss_fn(_pred, sample_y_oh)
+    loss_fn_compiled = @compile sync = true loss_fn(_pred, sample_y_oh)
     println("  compiled in $(round(time() - t_compile, digits=1))s")
 
     println("Training: $n_train samples, Val: $n_val samples, batch=$batchsize, epochs=$epochs, dev=$(typeof(dev))")
@@ -177,10 +264,10 @@ function train_plastic_model!(model, ps, st,
         @warn "n_val ($n_val) not divisible by batchsize ($batchsize); truncating last batch"
     end
     last_full_train = (n_train ÷ batchsize) * batchsize
-    last_full_val   = (n_val   ÷ batchsize) * batchsize
-    last_full_val   = max(last_full_val, 0)
+    last_full_val = (n_val ÷ batchsize) * batchsize
+    last_full_val = max(last_full_val, 0)
     n_train = last_full_train
-    n_val   = last_full_val
+    n_val = last_full_val
     if n_val == 0
         @warn "Validation set is empty after truncation; skipping val eval"
     end
@@ -198,7 +285,7 @@ function train_plastic_model!(model, ps, st,
         epoch_loss = 0f0
         n_batches = 0
         for i in 1:batchsize:n_train
-            idx = perm[i:min(i+batchsize-1, n_train)]
+            idx = perm[i:min(i + batchsize - 1, n_train)]
             xb = X_tr[:, idx] |> dev
             yb_int = Y_tr[idx] |> dev
             yb = onehot_compiled(yb_int)  # one-hot on the Reactant device
@@ -223,34 +310,49 @@ function train_plastic_model!(model, ps, st,
         val_count = 0
         if n_val > 0
             for i in 1:batchsize:n_val
-                idx = i:min(i+batchsize-1, n_val)
+                idx = i:min(i + batchsize - 1, n_val)
                 Xb = X_val[:, idx] |> dev
                 Yb_int = Y_val[idx] |> dev
                 Yb_oh = onehot_compiled(Yb_int)
                 y_logits, _ = model_compiled(Xb, train_state.parameters, st_val)
                 val_loss += loss_fn_compiled(y_logits, Yb_oh)
-                # argmax on ConcreteRArray
-                val_correct += Int(sum(argmax.(eachcol(y_logits)) .== (Y_val[idx])))
-                val_count  += length(Y_val[idx])
+                # Pull logits to a host Array, argmax per column, then shift
+                # from 1-based (Julia) to 0-based (PLASTIC_TYPE_TO_IDX).
+                y_logits_cpu = Array(y_logits)
+                y_pred_int = [argmax(view(y_logits_cpu, :, j)) - 1
+                              for j in 1:size(y_logits_cpu, 2)]
+                val_correct += sum(y_pred_int .== Y_val[idx])
+                val_count += length(Y_val[idx])
             end
             val_loss /= max(ceil(Int, n_val / batchsize), 1)
         end
-        val_acc   = val_count > 0 ? Float32(val_correct / val_count) : -1f0
+        val_acc = val_count > 0 ? Float32(val_correct / val_count) : -1f0
 
         @printf("Epoch %2d | train_loss=%.4f | val_loss=%.4f | val_acc=%5.2f%% | lr=%.2e\n",
-                e, train_loss, val_loss, 100 * val_acc, lr)
+            e, train_loss, val_loss, 100 * val_acc, lr)
 
         # --- Checkpoint if improved ---
-        if val_acc > best_val_acc
-            best_val_acc     = val_acc
+        # if val_acc > best_val_acc
+        #    best_val_acc = val_acc
+        #    epochs_no_improve = 0
+        #    save_plastic_checkpoint(train_state, e, best_val_acc, label_names)
+        # else
+        #     epochs_no_improve += 1
+        #     println("  No improvement ($epochs_no_improve/$patience)")
+        # end
+        improved = (n_val > 0) && (val_loss < best_val_loss - min_delta)
+        if improved
+            best_val_loss = val_loss
             epochs_no_improve = 0
-            save_plastic_checkpoint(train_state, e, best_val_acc, label_names)
+            save_plastic_checkpoint(train_state, e, val_loss, label_names)
         else
             epochs_no_improve += 1
             println("  No improvement ($epochs_no_improve/$patience)")
+
         end
 
-        if epochs_no_improve >= patience
+
+        if !force && epochs_no_improve >= patience
             println("\nEarly stopping at epoch $e (no improvement for $patience epochs)")
             break
         end
@@ -261,7 +363,7 @@ function train_plastic_model!(model, ps, st,
         println("\nRestoring best plastic model weights from checkpoint...")
         best_ps = fmap(x -> x |> dev, JLD2.load(PLASTIC_CHECKPOINT_PATH, "params"))
         best_st = fmap(x -> x isa AbstractArray ? x |> dev : x,
-                       JLD2.load(PLASTIC_CHECKPOINT_PATH, "states"))
+            JLD2.load(PLASTIC_CHECKPOINT_PATH, "states"))
         return (best_ps, best_st, Float32(best_val_acc))
     end
 
@@ -397,7 +499,7 @@ function train_model!(model, ps, st, chunk_paths::Vector{String},
             println("  No improvement ($epochs_no_improve/$patience)")
         end
 
-        if epochs_no_improve >= patience
+        if !force && epochs_no_improve >= patience
             println("\nEarly stopping at epoch $e (no improvement for $patience epochs)")
             break
         end
