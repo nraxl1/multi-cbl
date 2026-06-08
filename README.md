@@ -70,3 +70,16 @@ python predict.py --input ./unknown_samples/ --model cnn
 The default CNN has three conv blocks (Conv1d → BatchNorm → ReLU → MaxPool → Dropout) followed by a two-layer classifier head. Input spectra are resampled onto a common 400–4000 cm⁻¹ grid (3601 points) and standardized using the training set statistics.
 
 The `--model resnet` variant adds skip connections for slightly harder classification tasks.
+
+## Setup of the GUI
+
+This needs to be done after training the model
+
+install requirements
+```bash
+python -m pip install streamlit pandas matplotlib
+```
+run the website 
+```bash
+python -m pip streamlit run app.py
+```
