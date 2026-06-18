@@ -82,14 +82,29 @@ def resample_spectrum(
 
 # ── Dataset ──────────────────────────────────────────────────────────────────
 
-# Common wavenumber grid (399 → 4000 cm⁻¹, 3601 evenly spaced points)
-COMMON_WN = np.linspace(400, 4000, 3601, dtype=np.float32)
+# Define a common wavenumber grid based on the lab data (HDPE1_trn.csv).
+def _load_lab_wavenumbers(filepath: str) -> np.ndarray:
+    wn, _ = parse_spectrum_file(filepath)
+    return wn
+
+COMMON_WN = _load_lab_wavenumbers("./lab-data/HDPE1_trn.csv")
+# COMMON_WN = np.linspace(400, 4000, 3601, dtype=np.float32)
 
 
 def folder_to_class(folder_name: str) -> str:
-    """Strip resolution suffix (_c4, _c8, etc.) to get the base class label."""
     return re.sub(r"_c\d+$", "", folder_name)
+"""
 
+def folder_to_class(folder_name: str) -> str:
+    name = re.sub(r"_c\d+$", "", folder_name)
+    if name in ("HDPE", "LDPE"):
+        return "PE"
+    return name
+
+"""
+def transmittance_to_absorbance(spectrum: np.ndarray) -> np.ndarray:
+    t = np.clip(spectrum, 0.01, 100.0).astype(np.float64)
+    return (-np.log10(t / 100.0)).astype(np.float32)
 
 def load_all_spectra(data_root: str) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """
@@ -131,6 +146,10 @@ def load_all_spectra(data_root: str) -> tuple[np.ndarray, np.ndarray, list[str]]
                         n_fail += 1
                         continue
                     resampled = resample_spectrum(wn, tr, COMMON_WN)
+                    # normalise each spectrum to [0,1] to remove instrument baseline differences
+                    # rmin, rmax = resampled.min(), resampled.max()
+                    #if rmax > rmin:
+                        # resampled = (resampled - rmin) / (rmax - rmin)
                     spectra.append(resampled)
                     labels.append(label_idx)
                     n_ok += 1

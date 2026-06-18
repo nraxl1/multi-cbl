@@ -42,10 +42,28 @@ from model import SpectraCNN, SpectraResNet
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
 def label_from_filename(filename: str) -> str | None:
-    """Extract plastic type from filenames like HDPE1_trn.csv, PP5_trn.csv."""
+   
     match = re.match(r"^([A-Za-z]+)\d+", Path(filename).stem)
     return match.group(1).upper() if match else None
+
+"""
+
+def label_from_filename(filename: str) -> str | None:
+    match = re.match(r"^([A-Za-z]+)\d+", Path(filename).stem)
+    if not match:
+        return None
+    label = match.group(1).upper()
+    if label in ("HDPE", "LDPE"):
+        return "PE"
+    return label
+
+"""
+
+def transmittance_to_absorbance(spectrum: np.ndarray) -> np.ndarray:
+    t = np.clip(spectrum, 0.01, 100.0).astype(np.float64)
+    return (-np.log10(t / 100.0)).astype(np.float32)
 
 def load_model(model_dir: str, architecture: str = "cnn"):
     model_dir = Path(model_dir)
@@ -82,6 +100,9 @@ def predict_file(filepath: str, model, scaler, class_names) -> dict:
         return {"file": filepath, "error": "Too few data points"}
 
     resampled = resample_spectrum(wn, tr, COMMON_WN)
+    # rmin, rmax = resampled.min(), resampled.max()
+    # if rmax > rmin:
+    #     resampled = (resampled - rmin) / (rmax - rmin)
     scaled = scaler.transform(resampled.reshape(1, -1))
     tensor = torch.tensor(scaled, dtype=torch.float32).unsqueeze(1).to(DEVICE)
 
